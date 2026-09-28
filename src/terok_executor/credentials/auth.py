@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from rich.console import Console
-from terok_util import find_host_tool, podman_userns_args
+from terok_util import find_host_tool, podman_userns_args, require_host_tool
 
 from terok_executor.integrations.sandbox import (
     CODEX_SHARED_OAUTH_MARKER,
@@ -669,17 +669,22 @@ class AuthSession:
     def cleanup(self) -> None:
         """Release the temp dir and force-remove any lingering container.
 
-        Idempotent.  ``__exit__`` calls this automatically.
+        Idempotent. Container removal is best-effort; local cleanup runs even
+        when Podman cannot start. ``__exit__`` calls this automatically.
         """
-        subprocess.run(
-            ["podman", "rm", "-f", self.container_name],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        if self._tmpdir is not None:
-            self._tmpdir.cleanup()
-            self._tmpdir = None
+        try:
+            subprocess.run(
+                [require_host_tool("podman"), "rm", "-f", self.container_name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except OSError:
+            pass
+        finally:
+            if self._tmpdir is not None:
+                self._tmpdir.cleanup()
+                self._tmpdir = None
 
     def __enter__(self) -> AuthSession:
         """Return self; the heavy lifting already happened in the factory."""
@@ -754,7 +759,7 @@ def _prepare_oauth_session(
     command = [*provider.command, "--device-auth"] if device_auth else list(provider.command)
     run_args = () if device_auth else provider.extra_run_args
 
-    cmd = ["podman", "run", "--rm", *podman_userns_args(), "-it"]
+    cmd = [require_host_tool("podman"), "run", "--rm", *podman_userns_args(), "-it"]
     if run_args:
         cmd.extend(run_args)
     cmd.extend(["-v", f"{host_dir}:{provider.container_mount}:Z"])
@@ -843,14 +848,14 @@ def _check_podman() -> None:
 def _cleanup_existing_container(container_name: str) -> None:
     """Remove an existing container if it exists."""
     result = subprocess.run(
-        ["podman", "container", "exists", container_name],
+        [require_host_tool("podman"), "container", "exists", container_name],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
     if result.returncode == 0:
         print(f"Removing existing auth container: {container_name}")
         subprocess.run(
-            ["podman", "rm", "-f", container_name],
+            [require_host_tool("podman"), "rm", "-f", container_name],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

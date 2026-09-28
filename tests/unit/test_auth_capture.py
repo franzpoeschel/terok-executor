@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import json
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -1318,12 +1319,11 @@ class TestAuthenticateOauthGate:
 
 
 @pytest.fixture
-def podman_free(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+def podman_free(monkeypatch: pytest.MonkeyPatch, fake_podman: Path) -> list[list[str]]:
     """Neutralise the auth module's raw podman subprocess calls.
 
     ``prepare_oauth_session`` pre-cleans a stale auth container and
-    ``AuthSession.cleanup`` force-removes it on exit — both via bare
-    ``subprocess.run(["podman", …])``.  Unit tests must not depend on a
+    ``AuthSession.cleanup`` force-removes it on exit. Unit tests must not depend on a
     host podman (CI runners happen to ship one; dev containers don't),
     and must never reach a real one: the pre-clean would ``podman rm -f``
     a genuine ``host-auth-claude`` container if the operator had one.
@@ -1375,7 +1375,8 @@ class TestPrepareOauthSession:
             with prepare_oauth_session(
                 self._provider(), None, mounts_dir=tmp_path, image="terok-l1:test"
             ) as session:
-                assert session.argv[0] == "podman"
+                assert Path(session.argv[0]).is_absolute()
+                assert Path(session.argv[0]).name == "podman"
                 assert "terok-l1:test" in session.argv
                 assert session.argv[-1] == "claude"
                 mount_arg = f"{session.auth_dir}:/home/dev/.claude:Z"
@@ -1396,7 +1397,7 @@ class TestPrepareOauthSession:
                 assert "Claude" in session.title
                 assert "myproj" in session.title
                 assert "Banner line one." in session.banner
-                assert "$ podman run" in session.banner
+                assert f"$ {session.argv[0]} run" in session.banner
 
     def test_capture_delegates_to_capture_credentials(
         self, tmp_path: Path, podman_free: list[list[str]]
@@ -1464,6 +1465,47 @@ class TestPrepareOauthSession:
         session.cleanup()
         session.cleanup()
         assert not session.auth_dir.exists()
+
+    @pytest.mark.parametrize(
+        ("failure_point", "error"),
+        [
+            ("require_host_tool", FileNotFoundError("podman unavailable")),
+            ("subprocess.run", PermissionError("podman cannot start")),
+        ],
+    )
+    def test_cleanup_removes_credentials_when_podman_fails(
+        self,
+        tmp_path: Path,
+        podman_free: list[list[str]],
+        failure_point: str,
+        error: OSError,
+    ) -> None:
+        """Runtime failures cannot retain temporary credentials or mask an auth error."""
+        from terok_executor.credentials.auth import AuthSession
+
+        tmpdir = tempfile.TemporaryDirectory(dir=tmp_path)
+        auth_dir = Path(tmpdir.name)
+        (auth_dir / "credentials.json").write_text("temporary credentials")
+        session = AuthSession(
+            provider=self._provider(),
+            project_id=None,
+            container_name="host-auth-test",
+            argv=[],
+            banner="",
+            auth_dir=auth_dir,
+            mounts_dir=tmp_path,
+            _tmpdir=tmpdir,
+        )
+        auth_error = RuntimeError("authentication failed")
+        with patch(f"terok_executor.credentials.auth.{failure_point}", side_effect=error):
+            with pytest.raises(RuntimeError, match="authentication failed") as raised:
+                with session:
+                    raise auth_error
+            session.cleanup()
+
+        assert raised.value is auth_error
+        assert not auth_dir.exists()
+        assert session._tmpdir is None
 
     def test_authenticator_prepare_oauth_rejects_api_key_only_provider(
         self, tmp_path: Path
