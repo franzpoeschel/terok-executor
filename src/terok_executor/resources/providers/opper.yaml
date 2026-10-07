@@ -47,4 +47,4 @@ install:
         ln -sf opencode-toad         /usr/local/bin/oppertoad
 
 help:
-  label: '  \033[36mopper\033[0m - OpenCode with Opper'
+  label: '  \033[36mopper\033[0m      - OpenCode with Opper'
